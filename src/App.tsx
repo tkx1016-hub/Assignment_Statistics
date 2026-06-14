@@ -217,25 +217,146 @@ export default function App() {
     );
 
     try {
-      const response = await fetch("/api/parse-page", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-gemini-api-key": customApiKey || ""
-        },
-        body: JSON.stringify({
-          imageStr: item.imageUrl,
-          fileName: item.fileName,
-          customApiKey: customApiKey || ""
-        })
-      });
+      let parsedData: any = null;
 
-      if (!response.ok) {
-        const errJson = await response.json().catch(() => ({}));
-        throw new Error(errJson.error || `HTTP 错误代码: ${response.status}`);
+      // 如果用户在UI中配置了自定义 Gemini API Key，我们通过前端直接进行 API 解析呼叫！
+      // 这提供了对静态部署环境（例如 GitHub Pages）的完美支持，极速响应且不依赖后端代理，安全地直达 Google 神经网络。
+      if (customApiKey && customApiKey.trim() !== "") {
+        let base64Data = item.imageUrl;
+        let mimeType = "image/jpeg";
+
+        if (item.imageUrl.startsWith("data:")) {
+          const parts = item.imageUrl.split(";base64,");
+          mimeType = parts[0].split(":")[1];
+          base64Data = parts[1];
+        }
+
+        const prompt = `您是一个专业的教务和手工表格分析助手。
+请仔细分析并识别这张由老师手写填写的“班级学生作业登记表（查次数、查质量）”。
+
+你需要精确地从图片中识别和提取出以下几个要点：
+1. **班级名称 (className)**：通常在顶部的标题，格式如“西联G24紫荆班学生作业登记表”。请提取出完整的班级名称。
+2. **科目名称 (subject)**：在标题下方或旁边的“科目：”之后，包含手写汉字或英文单词。例如：“语文阅读”、“数学”、“英语写作”、“中文写作”、“公民”、“Speaking”、“听力”、“物理”、“化学”、“生物”、“经济”、“历史”等。
+3. **学生作业情况 (students)**：
+   分析表格中每一个学生的行。
+   - **序号 (index)**：在第一列，应是数字 1, 2, 3...
+   - **姓名 (name)**：在第二列，识别手写名字（例如：郭逸良、林芷伊等，精准识别手写别字）。
+   - **实交次数 (submitted)**：通常在小计一列中名为“实交”的方格内。类似算式 “5+1” 等，请直接计算并返回其总数 (6)。
+   - **应交次数 (required)**：通常在小计一列中的“应交”方格内。若全班统一由大括弧确定，请重复该数值填充到各行。
+   - **备注 (remarks)**：备注、免交、请假信息。
+
+请以完美的、符合 JSON schema 的格式返回结果。`;
+
+        // 使用通用、稳定的 gemini-2.5-flash 模型调用客户端
+        const restUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${customApiKey.trim()}`;
+        const response = await fetch(restUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            contents: [
+              {
+                parts: [
+                  {
+                    inlineData: {
+                      mimeType: mimeType,
+                      data: base64Data
+                    }
+                  },
+                  {
+                    text: prompt
+                  }
+                ]
+              }
+            ],
+            generationConfig: {
+              responseMimeType: "application/json",
+              responseSchema: {
+                type: "OBJECT",
+                properties: {
+                  className: {
+                    type: "STRING",
+                    description: "班级名称"
+                  },
+                  subject: {
+                    type: "STRING",
+                    description: "科目名称"
+                  },
+                  students: {
+                    type: "ARRAY",
+                    description: "学生行信息",
+                    items: {
+                      type: "OBJECT",
+                      properties: {
+                        index: { type: "INTEGER" },
+                        name: { type: "STRING" },
+                        submitted: { type: "NUMBER" },
+                        required: { type: "NUMBER" },
+                        remarks: { type: "STRING" }
+                      },
+                      required: ["name"]
+                    }
+                  }
+                },
+                required: ["subject", "students"]
+              }
+            }
+          })
+        });
+
+        if (!response.ok) {
+          const errText = await response.text();
+          let errJson: any;
+          try {
+            errJson = JSON.parse(errText);
+          } catch (e) {}
+          const errorMsg = errJson?.error?.message || `API 端错误 (代码 ${response.status}): ${errText}`;
+          throw new Error(errorMsg);
+        }
+
+        const rawResult = await response.json();
+        const outputText = rawResult?.candidates?.[0]?.content?.parts?.[0]?.text;
+
+        if (!outputText) {
+          throw new Error("模型无法正常提取返回文本，请检查您的 API 密钥属性及配额。");
+        }
+
+        // 清理潜在的 markdown 特殊符号
+        let cleaned = outputText.trim();
+        if (cleaned.startsWith("```")) {
+          cleaned = cleaned.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+        }
+        parsedData = JSON.parse(cleaned.trim());
+
+      } else {
+        // 未配置自定义 API key 时，请求托管的 Express 后端接口
+        const response = await fetch("/api/parse-page", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            imageStr: item.imageUrl,
+            fileName: item.fileName
+          })
+        });
+
+        if (!response.ok) {
+          // 如果返回 404，说明是在纯静态托管环境（如 GitHub Pages）中没有可用 Express 容器服务
+          if (response.status === 404) {
+            throw new Error(
+              "当前运行环境为纯静态网站（由于您使用了 GitHub Pages 等静态部署流程）。\n\n" +
+              "【解决方案】:\n" +
+              "您只需要在页面最上方的「配置外部 Gemini 密钥」输入框中，填入个人的 API 密钥，系统将自动激活前端直接解析功能，直接连接 Gemini 并且完美的在任何地方支持 OCR 提取！"
+            );
+          }
+          const errJson = await response.json().catch(() => ({}));
+          throw new Error(errJson.error || `HTTP 错误代码: ${response.status}`);
+        }
+
+        parsedData = await response.json();
       }
-
-      const parsedData = await response.json();
 
       setPages(prev =>
         prev.map(p =>

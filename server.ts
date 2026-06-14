@@ -153,7 +153,12 @@ app.post("/api/parse-page", async (req, res) => {
       throw new Error("Empty response from Gemini AI model.");
     }
 
-    const jsonParsed = JSON.parse(resultText);
+    let cleanedText = resultText.trim();
+    if (cleanedText.startsWith("```")) {
+      cleanedText = cleanedText.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+    }
+
+    const jsonParsed = JSON.parse(cleanedText.trim());
     res.json(jsonParsed);
   } catch (err: any) {
     console.error("[API Error] Failed to parse page:", err);
