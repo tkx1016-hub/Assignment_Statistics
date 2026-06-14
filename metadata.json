@@ -1,0 +1,8 @@
+{
+  "name": "Remix: 作业提交统计系统",
+  "description": "上传学生手写作业统计表扫描件（PDF或图片），系统自动分析、合并和导出多科目实交及应交成绩至Excel表格。",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
