@@ -91,7 +91,12 @@ app.post("/api/parse-page", async (req, res) => {
 
     const response = await ai.models.generateContent({
       model: "gemini-3.5-flash",
-      contents: [imagePart, prompt],
+      contents: {
+        parts: [
+          imagePart,
+          { text: prompt }
+        ]
+      },
       config: {
         responseMimeType: "application/json",
         responseSchema: {

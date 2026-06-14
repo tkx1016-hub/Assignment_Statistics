@@ -1223,6 +1223,26 @@ export default function App() {
                         </p>
                       </div>
                     </div>
+                  ) : selectedPage.status === "failed" ? (
+                    <div className="flex flex-col items-center justify-center py-12 text-center px-4">
+                      <div className="bg-red-50 p-3 rounded-full mb-3 border border-red-100">
+                        <XCircle className="h-8 w-8 text-red-500" />
+                      </div>
+                      <p className="text-sm font-bold text-slate-800">智能分析失败</p>
+                      <div className="mt-2 text-xs text-red-600 bg-red-50/50 p-3 rounded-lg border border-red-100/75 max-w-full text-left font-mono break-all whitespace-pre-wrap">
+                        {selectedPage.error || "未知解析错误，请确认网络连接或自定义 API 密钥。"}
+                      </div>
+                      <p className="text-[11px] text-slate-400 mt-3 max-w-[340px]">
+                        如果您使用的是默认服务而达到调用限额，请在页面顶部的 <strong>配置外部 Gemini 密钥</strong> 中添加您个人的 API 密钥。
+                      </p>
+                      <button
+                        onClick={() => triggerExtraction(selectedPage.id)}
+                        className="mt-4 flex items-center space-x-1.5 px-4 py-2 bg-red-600 hover:bg-red-700 text-white font-bold text-xs rounded-lg cursor-pointer transition-colors"
+                      >
+                        <RefreshCw className="h-3.5 w-3.5" />
+                        <span>重新开始识别</span>
+                      </button>
+                    </div>
                   ) : (
                     <div className="flex flex-col items-center justify-center py-20 text-center text-slate-400">
                       <AlertCircle className="h-10 w-10 text-slate-300 stroke-1 mb-2" />
