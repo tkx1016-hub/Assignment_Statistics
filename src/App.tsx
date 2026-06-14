@@ -22,7 +22,8 @@ import {
   ArrowRight,
   UserCheck,
   Edit3,
-  Undo2
+  Undo2,
+  Key
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import { PageItem, ConsolidatedStudent } from "./types";
@@ -38,6 +39,21 @@ export default function App() {
   const [isRenderingPdf, setIsRenderingPdf] = useState(false);
   const [notification, setNotification] = useState<{ type: "success" | "error" | "info"; text: string } | null>(null);
   
+  // Custom API key state from localStorage
+  const [customApiKey, setCustomApiKey] = useState<string>(() => {
+    return localStorage.getItem("custom_gemini_api_key") || "";
+  });
+
+  const handleApiKeyChange = (val: string) => {
+    const trimmed = val.trim();
+    setCustomApiKey(trimmed);
+    if (trimmed) {
+      localStorage.setItem("custom_gemini_api_key", trimmed);
+    } else {
+      localStorage.removeItem("custom_gemini_api_key");
+    }
+  };
+
   // Custom manual insertions
   const [showAddStudentField, setShowAddStudentField] = useState(false);
   const [newStudentName, setNewStudentName] = useState("");
@@ -203,10 +219,14 @@ export default function App() {
     try {
       const response = await fetch("/api/parse-page", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "x-gemini-api-key": customApiKey || ""
+        },
         body: JSON.stringify({
           imageStr: item.imageUrl,
-          fileName: item.fileName
+          fileName: item.fileName,
+          customApiKey: customApiKey || ""
         })
       });
 
@@ -647,6 +667,39 @@ export default function App() {
           </div>
         </div>
       </header>
+
+      {/* Custom Gemini API Key Configuration Panel */}
+      <div className="bg-amber-50/60 border-b border-amber-200/60 px-6 py-2.5 flex items-center justify-between flex-wrap gap-3 text-xs" id="api-key-config-panel">
+        <div className="flex items-center space-x-2 text-slate-700">
+          <Key className="h-4 w-4 text-amber-500 shrink-0" />
+          <span>
+            <strong>配置外部 Gemini 密钥 (可选)</strong>：如果遭遇接口调用出错或超出限额，您可以在此输入您的个人 <strong>Gemini API Key</strong> (一般由 <code className="bg-amber-100/60 px-1 py-0.5 rounded text-amber-800 font-mono">AIzaSy</code> 开头)。密钥仅保存在您的浏览器本地缓存中，不上传至任何第三方服务器。
+          </span>
+        </div>
+        <div className="flex items-center space-x-2 shrink-0">
+          <input
+            type="password"
+            placeholder="输入您的 Gemini API Key (AIzaSy...)"
+            value={customApiKey}
+            onChange={(e) => handleApiKeyChange(e.target.value)}
+            className="bg-white border border-amber-200 focus:border-amber-400 rounded-lg px-2.5 py-1 text-xs w-64 text-slate-800 focus:outline-hidden shadow-xs transition-colors"
+            id="custom-api-key-field"
+          />
+          {customApiKey ? (
+            <button
+              onClick={() => handleApiKeyChange("")}
+              className="text-red-500 hover:text-red-600 bg-red-50 hover:bg-red-100 border border-red-100 px-2.5 py-1 rounded-lg text-xs font-semibold cursor-pointer transition-colors"
+              id="clear-custom-key-btn"
+            >
+              清除
+            </button>
+          ) : (
+            <span className="text-slate-500/70 text-xs font-medium select-none">
+              (使用默认服务)
+            </span>
+          )}
+        </div>
+      </div>
 
       {/* Primary Workspace Layout */}
       <main className="flex-1 flex overflow-hidden">

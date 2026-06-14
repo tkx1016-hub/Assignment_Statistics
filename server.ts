@@ -13,24 +13,23 @@ const PORT = 3000;
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
-// Initialize Gemini SDK lazily to prevent startup crashes if GEMINI_API_KEY is not defined yet
-let aiClient: GoogleGenAI | null = null;
-function getAiClient(): GoogleGenAI {
-  if (!aiClient) {
-    const key = process.env.GEMINI_API_KEY;
-    if (!key) {
-      throw new Error("GEMINI_API_KEY environment variable is required to process handwritten sheets. Please configure it in your Secrets / Env settings.");
-    }
-    aiClient = new GoogleGenAI({
-      apiKey: key,
-      httpOptions: {
-        headers: {
-          "User-Agent": "aistudio-build",
-        },
-      },
-    });
+// Initialize Gemini SDK dynamically (allowing custom API key overrides per request)
+function getAiClient(customKey?: string): GoogleGenAI {
+  const key = customKey || process.env.GEMINI_API_KEY;
+  if (!key) {
+    throw new Error(
+      "GEMINI_API_KEY environment variable or a custom API key is required to process handwritten sheets. " +
+      "Please enter your custom Gemini API key in the input box at the top of the webpage, or configure GEMINI_API_KEY in Secrets."
+    );
   }
-  return aiClient;
+  return new GoogleGenAI({
+    apiKey: key,
+    httpOptions: {
+      headers: {
+        "User-Agent": "aistudio-build",
+      },
+    },
+  });
 }
 
 // API Health check
@@ -41,7 +40,10 @@ app.get("/api/health", (req, res) => {
 // API endpoint to parse a single page image using Gemini 3.5 Flash
 app.post("/api/parse-page", async (req, res) => {
   try {
-    const { imageStr, fileName } = req.body;
+    const { imageStr, fileName, customApiKey } = req.body;
+    const keyHeader = req.headers["x-gemini-api-key"] as string | undefined;
+    const keyToUse = customApiKey || keyHeader;
+
     if (!imageStr) {
       return res.status(400).json({ error: "No image content provided (imageStr is missing)." });
     }
@@ -55,7 +57,7 @@ app.post("/api/parse-page", async (req, res) => {
       base64Data = parts[1];
     }
 
-    const ai = getAiClient();
+    const ai = getAiClient(keyToUse);
 
     const imagePart = {
       inlineData: {
