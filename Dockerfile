@@ -33,7 +33,7 @@ ENV PORT=3000
 COPY package*.json ./
 
 # Install only production dependencies to save container size
-RUN npm ci --only=production
+RUN npm ci --omit=dev
 
 # Copy compiled folders from build stage (client files + server bundle)
 COPY --from=builder /app/dist ./dist
