@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from "react";
+import React, { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import {
   Upload,
@@ -33,11 +33,17 @@ export default function App() {
   // --- States ---
   const [pages, setPages] = useState<PageItem[]>([]);
   const [selectedPageId, setSelectedPageId] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<"master" | "calibration">("master");
+  const [activeTab, setActiveTab] = useState<"master" | "calibration" | "roster">("master");
   const [searchQuery, setSearchQuery] = useState("");
   const [isProcessingAll, setIsProcessingAll] = useState(false);
   const [isRenderingPdf, setIsRenderingPdf] = useState(false);
   const [notification, setNotification] = useState<{ type: "success" | "error" | "info"; text: string } | null>(null);
+  
+  // --- Fuzzy Name Roster States ---
+  const [customRoster, setCustomRoster] = useState<Record<number, string>>({});
+  const [enableFuzzyAlignment, setEnableFuzzyAlignment] = useState(true);
+  const [editingRosterIndex, setEditingRosterIndex] = useState<number | null>(null);
+  const [editingRosterValue, setEditingRosterValue] = useState("");
   
   // Custom API key state from localStorage
   const [customApiKey, setCustomApiKey] = useState<string>(() => {
@@ -537,6 +543,123 @@ export default function App() {
     );
   };
 
+  // --- Fuzzy Name Roster & Correction Engine ---
+  
+  // Helper to compute edit distance (Levenshtein distance)
+  const getEditDistance = (s1: string, s2: string): number => {
+    const m = s1.length;
+    const n = s2.length;
+    const dp: number[][] = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0));
+    for (let i = 0; i <= m; i++) dp[i][0] = i;
+    for (let j = 0; j <= n; j++) dp[0][j] = j;
+    for (let i = 1; i <= m; i++) {
+      for (let j = 1; j <= n; j++) {
+        if (s1[i - 1] === s2[j - 1]) {
+          dp[i][j] = dp[i - 1][j - 1];
+        } else {
+          dp[i][j] = Math.min(
+            dp[i - 1][j] + 1,    // deletion
+            dp[i][j - 1] + 1,    // insertion
+            dp[i - 1][j - 1] + 1 // substitution
+          );
+        }
+      }
+    }
+    return dp[m][n];
+  };
+
+  const getChineseSimilarity = (name1: string, name2: string): number => {
+    if (!name1 || !name2) return 0;
+    if (name1 === name2) return 1.0;
+    const dist = getEditDistance(name1, name2);
+    const maxLen = Math.max(name1.length, name2.length);
+    if (maxLen === 0) return 0.0;
+    return 1 - dist / maxLen;
+  };
+
+  // 1. Dynamic calculated roster map (Record<index, standardName>) based on frequencies
+  const computedRoster = useMemo(() => {
+    const completed = pages.filter(p => p.status === "completed" && p.result);
+    const indexGroups: Record<number, Record<string, number>> = {};
+    
+    completed.forEach(page => {
+      page.result!.students.forEach(st => {
+        const idx = st.index;
+        const name = st.name?.trim();
+        if (!idx || !name) return;
+        
+        if (!indexGroups[idx]) {
+          indexGroups[idx] = {};
+        }
+        indexGroups[idx][name] = (indexGroups[idx][name] || 0) + 1;
+      });
+    });
+    
+    const rosterMap: Record<number, string> = {};
+    Object.keys(indexGroups).forEach(idxStr => {
+      const idx = Number(idxStr);
+      const nameMap = indexGroups[idx];
+      let bestName = "";
+      let maxCount = -1;
+      Object.keys(nameMap).forEach(name => {
+        if (nameMap[name] > maxCount) {
+          maxCount = nameMap[name];
+          bestName = name;
+        }
+      });
+      
+      // Use user override if exists, otherwise the most frequent auto-detected name
+      if (customRoster[idx]) {
+        rosterMap[idx] = customRoster[idx];
+      } else if (bestName) {
+        rosterMap[idx] = bestName;
+      }
+    });
+
+    // Merge manually edited/added items in customRoster which are not in indexGroups yet
+    Object.keys(customRoster).forEach(idxStr => {
+      const idx = Number(idxStr);
+      rosterMap[idx] = customRoster[idx];
+    });
+    
+    return rosterMap;
+  }, [pages, customRoster]);
+
+  // 2. High performance alignment resolver
+  const getAlignedStudentName = useCallback((rawName: string, index: number | undefined): string => {
+    const name = rawName.trim();
+    if (!name) return "";
+    if (!enableFuzzyAlignment) return name;
+
+    // A. Match by index first if standard name exists for this index
+    if (index !== undefined && computedRoster[index]) {
+      const stdName = computedRoster[index];
+      // If ocrName has high similarity to the roster student at this index, we trust the index!
+      if (getChineseSimilarity(name, stdName) >= 0.5) {
+        return stdName;
+      }
+    }
+
+    // B. Search standard names in computedRoster for the closest fuzzy name match
+    let bestMatchName = name;
+    let bestScore = 0;
+    Object.values(computedRoster).forEach(stdNameVal => {
+      const stdName = stdNameVal as string;
+      const score = getChineseSimilarity(name, stdName);
+      if (score > bestScore) {
+        bestScore = score;
+        bestMatchName = stdName;
+      }
+    });
+
+    // If similarity is high enough, map to the roster student
+    if (bestScore >= 0.65) {
+      return bestMatchName;
+    }
+
+    return name;
+  }, [computedRoster, enableFuzzyAlignment]);
+
   // --- Dynamic Consolidation Calculations ---
   const { subjects, consolidatedStudents, classNameInfo } = useMemo(() => {
     const completed = pages.filter(p => p.status === "completed" && p.result);
@@ -563,7 +686,11 @@ export default function App() {
     completed.forEach(page => {
       const sub = page.result!.subject.trim();
       page.result!.students.forEach(st => {
-        const name = st.name?.trim();
+        const rawName = st.name?.trim() || "";
+        if (!rawName) return;
+
+        // Apply our alignment engine to resolve any handwriting OCR variations
+        const name = getAlignedStudentName(rawName, st.index);
         if (!name) return;
 
         if (!studentMap[name]) {
@@ -595,7 +722,7 @@ export default function App() {
       consolidatedStudents: sortedStudents,
       classNameInfo: mainClass
     };
-  }, [pages]);
+  }, [pages, getAlignedStudentName]);
 
   // Handle manual additions directly in the consolidated master scoreboard
   const handleAddStudentMaster = (e: React.FormEvent) => {
@@ -683,7 +810,8 @@ export default function App() {
       prev.map(p => {
         if (p.status === "completed" && p.result && p.result.subject === subject) {
           const updatedStudents = p.result.students.map(st => {
-            if (st.name === studentName) {
+            const alignedName = getAlignedStudentName(st.name || "", st.index);
+            if (alignedName === studentName) {
               return { ...st, [field]: numVal };
             }
             return st;
@@ -1105,7 +1233,20 @@ export default function App() {
                 title={selectedPage ? "对当前选中单页的识别值进行人工校准" : "请先选择左侧任意纸电单页"}
               >
                 <Eye className="h-4 w-4" />
-                <span>单单单页人工校准</span>
+                <span>单页人工校准</span>
+              </button>
+
+              <button
+                onClick={() => setActiveTab("roster")}
+                className={`flex items-center space-x-1.5 px-4 py-2 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                  activeTab === "roster"
+                    ? "bg-white text-slate-800 shadow-sm"
+                    : "text-slate-500 hover:text-slate-800"
+                }`}
+                id="tab-roster-btn"
+              >
+                <UserCheck className="h-4 w-4" />
+                <span>智能姓名对齐 ({Object.keys(computedRoster).length} 人)</span>
               </button>
             </div>
 
@@ -1439,6 +1580,183 @@ export default function App() {
 
               </div>
 
+            </div>
+          )}
+
+          {/* TAB CONTENT 3: SMART ROSTER ALIGNMENT */}
+          {activeTab === "roster" && (
+            <div className="bg-white border border-slate-200 rounded-xl flex-1 flex flex-col overflow-hidden shadow-xs p-6">
+              <div className="mb-6">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center space-x-2">
+                    <div className="p-2 bg-sky-50 rounded-lg text-sky-600">
+                      <UserCheck className="h-5 w-5" />
+                    </div>
+                    <div>
+                      <h2 className="text-sm font-bold text-slate-800">智能班级花名册与手写姓名对齐</h2>
+                      <p className="text-xs text-slate-400 mt-0.5">自动修正手写识别中的同音别字、字形误差，将同一位学生的不同识别记录完美融合到单行中。</p>
+                    </div>
+                  </div>
+                  
+                  {/* Toggle Enable Fuzzy Alignment */}
+                  <div className="flex items-center space-x-2 bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 shadow-2xs">
+                    <input
+                      type="checkbox"
+                      id="toggle-fuzzy"
+                      checked={enableFuzzyAlignment}
+                      onChange={(e) => {
+                        setEnableFuzzyAlignment(e.target.checked);
+                        triggerNotification("info", e.target.checked ? "已开启智能姓名模糊校对机制" : "已关闭智能姓名校对，将展现原始OCR名称");
+                      }}
+                      className="rounded border-slate-300 text-sky-600 focus:ring-sky-500 h-4 w-4"
+                    />
+                    <label htmlFor="toggle-fuzzy" className="text-xs font-semibold text-slate-600 cursor-pointer">
+                      启用智能姓名模糊校对
+                    </label>
+                  </div>
+                </div>
+
+                <div className="mt-4 p-3.5 bg-sky-50/50 border border-sky-100 rounded-xl text-xs text-sky-800 leading-relaxed">
+                  <strong>💡 运作机理</strong>：当不同科目登记表中，同一个学生的名字因手写潦草被误识为别字时（例如“付蕾衣”被误识为“付雷衣”或“付蕾依”），系统会结合<strong>【表格序号匹配】</strong>和<strong>【字形相似度算法】</strong>进行智能映射，并将其在各个科目下的实交、应交、备注数据聚合在同一位学生名下。
+                  您可以在下方直接编辑每个学号对应的<strong>标准姓名</strong>，编辑后全单页的关联识别别字将一秒同步自动纠错！
+                </div>
+              </div>
+
+              {/* Roster list view */}
+              <div className="flex-1 overflow-auto border border-slate-150 rounded-xl">
+                <table className="min-w-full divide-y divide-slate-200 border-collapse">
+                  <thead className="bg-slate-50 sticky top-0">
+                    <tr>
+                      <th className="px-5 py-3 text-left text-xs font-bold text-slate-500 uppercase w-20 border-b border-slate-200">学号/序号</th>
+                      <th className="px-5 py-3 text-left text-xs font-bold text-slate-800 uppercase w-56 border-b border-slate-200">标准花名册姓名 (可编辑)</th>
+                      <th className="px-5 py-3 text-left text-xs font-bold text-slate-500 uppercase border-b border-slate-200">被智能合并的手写 / OCR 识别原始词</th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white divide-y divide-slate-100 text-xs">
+                    {Object.keys(computedRoster).length === 0 ? (
+                      <tr>
+                        <td colSpan={3} className="px-6 py-12 text-center text-slate-400">
+                          当前尚未解析任何登记表，暂未提取出班级学生名册。请先加载示例数据或上传您的登记表！
+                        </td>
+                      </tr>
+                    ) : (
+                      Object.keys(computedRoster)
+                        .map(Number)
+                        .sort((a, b) => a - b)
+                        .map((idx) => {
+                          const standardName = computedRoster[idx];
+                          const isEditing = editingRosterIndex === idx;
+
+                          // Find all original OCR names across all completed sheets that match this standard student
+                          const matchedOcrWords: { subject: string; originalName: string }[] = [];
+                          pages.forEach(p => {
+                            if (p.status === "completed" && p.result) {
+                              p.result.students.forEach(st => {
+                                if (st.name) {
+                                  const aligned = getAlignedStudentName(st.name, st.index);
+                                  if (aligned === standardName) {
+                                    matchedOcrWords.push({
+                                      subject: p.result!.subject,
+                                      originalName: st.name
+                                    });
+                                  }
+                                }
+                              });
+                            }
+                          });
+
+                          // Group matched names to keep them unique in display badges
+                          const uniqueMatches = Array.from(new Set(matchedOcrWords.map(m => `${m.originalName} (${m.subject})`)));
+
+                          return (
+                            <tr key={idx} className="hover:bg-slate-50/40 transition-colors">
+                              <td className="px-5 py-3.5 font-mono font-bold text-slate-400 border-r border-slate-100">
+                                {idx}
+                              </td>
+                              <td className="px-5 py-3.5 font-semibold text-slate-800 border-r border-slate-100">
+                                {isEditing ? (
+                                  <div className="flex items-center space-x-1.5">
+                                    <input
+                                      type="text"
+                                      value={editingRosterValue}
+                                      onChange={(e) => setEditingRosterValue(e.target.value)}
+                                      className="border border-sky-300 bg-white rounded px-2 py-1 text-xs font-bold text-slate-800 outline-hidden w-32 focus:ring-1 focus:ring-sky-500"
+                                      autoFocus
+                                    />
+                                    <button
+                                      onClick={() => {
+                                        const trimmed = editingRosterValue.trim();
+                                        if (trimmed) {
+                                          setCustomRoster(prev => ({ ...prev, [idx]: trimmed }));
+                                          setEditingRosterIndex(null);
+                                          triggerNotification("success", `已将学号 ${idx} 的标准姓名更改为「${trimmed}」`);
+                                        }
+                                      }}
+                                      className="bg-sky-600 hover:bg-sky-700 text-white p-1 rounded-md text-[10px] font-bold cursor-pointer"
+                                    >
+                                      保存
+                                    </button>
+                                    <button
+                                      onClick={() => setEditingRosterIndex(null)}
+                                      className="text-slate-400 hover:text-slate-600 px-1 py-1"
+                                    >
+                                      取消
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <div className="flex items-center space-x-2 group/btn">
+                                    <span className="text-slate-900 font-bold">{standardName}</span>
+                                    <button
+                                      onClick={() => {
+                                        setEditingRosterIndex(idx);
+                                        setEditingRosterValue(standardName);
+                                      }}
+                                      className="p-1 rounded-md text-slate-400 hover:text-sky-600 hover:bg-sky-50 cursor-pointer transition-colors"
+                                      title="编辑此学号的姓名"
+                                    >
+                                      <Edit3 className="h-3 w-3" />
+                                    </button>
+                                  </div>
+                                )}
+                              </td>
+                              <td className="px-5 py-3.5 text-slate-500">
+                                <div className="flex flex-wrap gap-1.5">
+                                  {uniqueMatches.map((badgeText, bIdx) => (
+                                    <span key={bIdx} className="inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-medium bg-slate-100 text-slate-600 border border-slate-200">
+                                      {badgeText}
+                                    </span>
+                                  ))}
+                                  {uniqueMatches.length === 0 && (
+                                    <span className="text-slate-300 italic">暂无对应的手写识别词组</span>
+                                  )}
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })
+                    )}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Roster Footer reset */}
+              <div className="mt-4 flex justify-between items-center text-xs text-slate-400">
+                <span>提示：点击姓名旁边的编辑图标即可纠正。若您清空了工作区，花名册也会相应清空。</span>
+                {Object.keys(customRoster).length > 0 && (
+                  <button
+                    onClick={() => {
+                      if (window.confirm("确定要重置花名册到自动探测的默认名称吗？")) {
+                        setCustomRoster({});
+                        triggerNotification("info", "已清除所有手动对齐的姓名重写规则。");
+                      }
+                    }}
+                    className="flex items-center space-x-1 px-3 py-1 bg-slate-100 hover:bg-slate-200 text-slate-600 hover:text-slate-800 rounded-lg font-medium transition-all cursor-pointer border border-slate-200"
+                  >
+                    <Undo2 className="h-3.5 w-3.5" />
+                    <span>恢复到默认自动识别值</span>
+                  </button>
+                )}
+              </div>
             </div>
           )}
 
